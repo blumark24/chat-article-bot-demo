@@ -331,6 +331,56 @@ th {
   color: #647386;
 }
 
+.round-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid #e7edf3;
+  border-bottom: 1px solid #e7edf3;
+}
+
+.round-box h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.round-status {
+  margin: 0;
+  color: #526171;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.checkbox-field input {
+  width: auto;
+}
+
+select {
+  width: 100%;
+  border: 1px solid #d1dae5;
+  border-radius: 8px;
+  background: #fff;
+  color: #172033;
+  outline: none;
+  padding: 0.75rem 0.85rem;
+  font: inherit;
+}
+
+select:focus {
+  border-color: #176b87;
+  box-shadow: 0 0 0 3px rgba(23, 107, 135, 0.14);
+}
+
+.copy-alert {
+  color: #b42318;
+  font-weight: 700;
+}
+
 @media (max-width: 880px) {
   .workspace-grid,
   .lower-grid {

@@ -1,4 +1,14 @@
 import { ChangeEvent, FormEvent, useMemo, useState } from "react";
+import {
+  WIN_LIMIT_OPTIONS,
+  buildDisplayedLine,
+  isCopyAttempt,
+  isCorrectAnswer,
+  pickRandomLine,
+  roundModeLabel,
+  type RoundMode,
+  type WinLimit,
+} from "./roundUtils";
 
 type QAItem = {
   keywords: string[];
@@ -20,12 +30,24 @@ type BotLog = {
   message: string;
   botReply: string;
   pointAdded: boolean;
+  roundType?: RoundMode;
+  originalLine?: string;
+  displayedLine?: string;
+  copyDetected?: boolean;
 };
+
+type ActiveReverseRound = {
+  originalLine: string;
+  displayedLine: string;
+  answered: boolean;
+};
+
+const REVERSE_COMMAND = "!عكسي";
 
 const defaultQuestions: QAItem[] = [
   {
     keywords: ["مقال", "ارسل مقال", "المقال"],
-    answer: "هذا مثال على مقال تجريبي يتم إرساله بواسطة البوت.",
+    answer: "الشركات من السرقة والاختراق",
   },
   {
     keywords: ["النقاط", "ترتيبي"],
@@ -44,6 +66,8 @@ const storageKeys = {
   points: "chat-article-bot-demo:points",
   logs: "chat-article-bot-demo:logs",
   botEnabled: "chat-article-bot-demo:bot-enabled",
+  winLimit: "chat-article-bot-demo:win-limit",
+  lightDecoration: "chat-article-bot-demo:light-decoration",
 };
 
 function readStorage<T>(key: string, fallback: T): T {
@@ -96,6 +120,10 @@ function downloadFile(filename: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+function getQuestionLines(questions: QAItem[]): string[] {
+  return questions.flatMap((item) => [item.answer, ...item.keywords]);
+}
+
 export default function App() {
   const [botEnabled, setBotEnabled] = useState(() =>
     readStorage(storageKeys.botEnabled, true),
@@ -109,11 +137,23 @@ export default function App() {
   const [logs, setLogs] = useState<BotLog[]>(() =>
     readStorage(storageKeys.logs, []),
   );
+  const [roundMode, setRoundMode] = useState<RoundMode>(() =>
+    readStorage(storageKeys.botEnabled, true) ? "normal" : "stopped",
+  );
+  const [winLimit, setWinLimit] = useState<WinLimit>(() =>
+    readStorage(storageKeys.winLimit, 10),
+  );
+  const [lightDecoration, setLightDecoration] = useState(() =>
+    readStorage(storageKeys.lightDecoration, true),
+  );
+  const [activeReverseRound, setActiveReverseRound] = useState<ActiveReverseRound | null>(
+    null,
+  );
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: makeId(),
       sender: "النظام",
-      text: "الغرفة جاهزة. جرّب كتابة: السلام عليكم، مقال، أو النقاط.",
+      text: "الغرفة جاهزة. جرّب كتابة: السلام عليكم، مقال، النقاط، أو الأمر !عكسي لبدء جولة عكسية.",
       role: "system",
       time: getTime(),
     },
@@ -133,9 +173,25 @@ export default function App() {
     [points],
   );
 
+  const effectiveRoundMode: RoundMode = activeReverseRound
+    ? "reverse"
+    : roundMode === "stopped"
+      ? "stopped"
+      : botEnabled
+        ? "normal"
+        : "stopped";
+
   function saveBotEnabled(value: boolean) {
     setBotEnabled(value);
     writeStorage(storageKeys.botEnabled, value);
+    if (value) {
+      setRoundMode("normal");
+    } else {
+      setRoundMode("stopped");
+      if (activeReverseRound) {
+        endReverseRound(false);
+      }
+    }
   }
 
   function saveQuestions(value: QAItem[]) {
@@ -148,17 +204,244 @@ export default function App() {
     writeStorage(storageKeys.points, value);
   }
 
-  function saveLogs(value: BotLog[]) {
-    setLogs(value);
-    writeStorage(storageKeys.logs, value);
+  function appendLog(log: BotLog) {
+    setLogs((current) => {
+      const next = [log, ...current];
+      writeStorage(storageKeys.logs, next);
+      return next;
+    });
   }
 
   function appendMessage(message: ChatMessage) {
     setMessages((current) => [...current, message]);
   }
 
-  function appendLog(log: BotLog) {
-    saveLogs([log, ...logs]);
+  function saveWinLimit(value: WinLimit) {
+    setWinLimit(value);
+    writeStorage(storageKeys.winLimit, value);
+  }
+
+  function saveLightDecoration(value: boolean) {
+    setLightDecoration(value);
+    writeStorage(storageKeys.lightDecoration, value);
+  }
+
+  function announceWinner(winnerName: string, winnerScore: number) {
+    const announcement = `انتهت الجولة، الفائز هو ${winnerName} بعدد ${winnerScore} نقاط.`;
+    appendMessage({
+      id: makeId(),
+      sender: "النظام",
+      text: announcement,
+      role: "system",
+      time: getTime(),
+    });
+    setNotice(announcement);
+  }
+
+  function checkWinLimit(nextPoints: Record<string, number>, playerName: string) {
+    const playerScore = nextPoints[playerName] ?? 0;
+    if (playerScore >= winLimit) {
+      announceWinner(playerName, playerScore);
+      endReverseRound(false);
+      return true;
+    }
+    return false;
+  }
+
+  function startReverseRound(fromControl = false) {
+    if (!botEnabled) {
+      setNotice("شغّل البوت أولاً قبل بدء الجولة العكسية.");
+      return;
+    }
+
+    const originalLine = pickRandomLine(getQuestionLines(questions));
+    if (!originalLine) {
+      setNotice("لا توجد أسطر في قائمة الأسئلة أو المقالات.");
+      return;
+    }
+
+    const displayedLine = buildDisplayedLine(originalLine, lightDecoration);
+    const time = getTime();
+
+    setRoundMode("reverse");
+    setActiveReverseRound({
+      originalLine,
+      displayedLine,
+      answered: false,
+    });
+
+    appendMessage({
+      id: makeId(),
+      sender: "النظام",
+      text: fromControl
+        ? "بدأت جولة عكسية جديدة من لوحة التحكم."
+        : "بدأت جولة عكسية جديدة. اكتب السطر الأصلي الصحيح بأسرع ما يمكن.",
+      role: "system",
+      time,
+    });
+
+    appendMessage({
+      id: makeId(),
+      sender: "البوت",
+      text: `السطر المعروض (عكسي):\n${displayedLine}`,
+      role: "bot",
+      time: getTime(),
+    });
+
+    appendLog({
+      id: makeId(),
+      time,
+      username: "النظام",
+      message: "بداية الجولة العكسية",
+      botReply: `السطر الأصلي: ${originalLine}`,
+      pointAdded: false,
+      roundType: "reverse",
+      originalLine,
+      displayedLine,
+      copyDetected: false,
+    });
+
+    setNotice("بدأت الجولة العكسية.");
+  }
+
+  function endReverseRound(showNotice = true) {
+    setActiveReverseRound(null);
+    setRoundMode("stopped");
+    if (showNotice) {
+      setNotice("تم إنهاء الجولة.");
+      appendMessage({
+        id: makeId(),
+        sender: "النظام",
+        text: "تم إنهاء الجولة الحالية.",
+        role: "system",
+        time: getTime(),
+      });
+    }
+  }
+
+  function handleReverseAnswer(
+    cleanMessage: string,
+    cleanUsername: string,
+    time: string,
+    round: ActiveReverseRound,
+  ) {
+    const copyDetected = isCopyAttempt(cleanMessage, round.displayedLine);
+
+    if (copyDetected) {
+      const alertText = `تنبيه: المستخدم ${cleanUsername} كتب نصاً مطابقاً أو منسوخاً.`;
+      appendMessage({
+        id: makeId(),
+        sender: "النظام",
+        text: alertText,
+        role: "system",
+        time: getTime(),
+      });
+
+      appendLog({
+        id: makeId(),
+        time,
+        username: cleanUsername,
+        message: cleanMessage,
+        botReply: alertText,
+        pointAdded: false,
+        roundType: "reverse",
+        originalLine: round.originalLine,
+        displayedLine: round.displayedLine,
+        copyDetected: true,
+      });
+      return;
+    }
+
+    if (round.answered || !isCorrectAnswer(cleanMessage, round.originalLine)) {
+      appendLog({
+        id: makeId(),
+        time,
+        username: cleanUsername,
+        message: cleanMessage,
+        botReply: round.answered
+          ? "تم احتساب إجابة صحيحة مسبقاً لهذا السطر."
+          : "الإجابة غير صحيحة بعد.",
+        pointAdded: false,
+        roundType: "reverse",
+        originalLine: round.originalLine,
+        displayedLine: round.displayedLine,
+        copyDetected: false,
+      });
+      return;
+    }
+
+    const nextPoints = {
+      ...points,
+      [cleanUsername]: (points[cleanUsername] ?? 0) + 1,
+    };
+    savePoints(nextPoints);
+
+    setActiveReverseRound({
+      ...round,
+      answered: true,
+    });
+
+    const botReply = `إجابة صحيحة! نقطة لـ ${cleanUsername}.`;
+
+    appendMessage({
+      id: makeId(),
+      sender: "البوت",
+      text: botReply,
+      role: "bot",
+      time: getTime(),
+    });
+
+    appendLog({
+      id: makeId(),
+      time,
+      username: cleanUsername,
+      message: cleanMessage,
+      botReply,
+      pointAdded: true,
+      roundType: "reverse",
+      originalLine: round.originalLine,
+      displayedLine: round.displayedLine,
+      copyDetected: false,
+    });
+
+    if (checkWinLimit(nextPoints, cleanUsername)) {
+      return;
+    }
+
+    const nextOriginal = pickRandomLine(getQuestionLines(questions));
+    if (!nextOriginal) {
+      endReverseRound(false);
+      setNotice("انتهت الأسطر المتاحة للجولة العكسية.");
+      return;
+    }
+
+    const nextDisplayed = buildDisplayedLine(nextOriginal, lightDecoration);
+    setActiveReverseRound({
+      originalLine: nextOriginal,
+      displayedLine: nextDisplayed,
+      answered: false,
+    });
+
+    appendMessage({
+      id: makeId(),
+      sender: "البوت",
+      text: `السطر التالي (عكسي):\n${nextDisplayed}`,
+      role: "bot",
+      time: getTime(),
+    });
+
+    appendLog({
+      id: makeId(),
+      time: getTime(),
+      username: "النظام",
+      message: "سطر جديد في الجولة العكسية",
+      botReply: `السطر الأصلي: ${nextOriginal}`,
+      pointAdded: false,
+      roundType: "reverse",
+      originalLine: nextOriginal,
+      displayedLine: nextDisplayed,
+      copyDetected: false,
+    });
   }
 
   function handleSend(event: FormEvent) {
@@ -179,6 +462,16 @@ export default function App() {
     appendMessage(userMessage);
     setMessageText("");
 
+    if (cleanMessage === REVERSE_COMMAND) {
+      startReverseRound(false);
+      return;
+    }
+
+    if (activeReverseRound) {
+      handleReverseAnswer(cleanMessage, cleanUsername, time, activeReverseRound);
+      return;
+    }
+
     if (!botEnabled) {
       appendLog({
         id: makeId(),
@@ -187,6 +480,7 @@ export default function App() {
         message: cleanMessage,
         botReply: "البوت متوقف حالياً",
         pointAdded: false,
+        roundType: "stopped",
       });
       return;
     }
@@ -218,6 +512,7 @@ export default function App() {
       message: cleanMessage,
       botReply,
       pointAdded,
+      roundType: "normal",
     });
   }
 
@@ -275,7 +570,8 @@ export default function App() {
   }
 
   function clearLogs() {
-    saveLogs([]);
+    setLogs([]);
+    writeStorage(storageKeys.logs, []);
     setNotice("تم مسح السجلات.");
   }
 
@@ -287,12 +583,29 @@ export default function App() {
   function exportLogsTxt() {
     const content =
       logs
-        .map(
-          (log) =>
-            `[${log.time}] المستخدم: ${log.username}\nالرسالة: ${log.message}\nرد البوت: ${log.botReply}\nالنقطة: ${
-              log.pointAdded ? "نعم" : "لا"
-            }\n`,
-        )
+        .map((log) => {
+          const parts = [
+            `[${log.time}] المستخدم: ${log.username}`,
+            `الرسالة: ${log.message}`,
+            `رد البوت: ${log.botReply}`,
+            `النقطة: ${log.pointAdded ? "نعم" : "لا"}`,
+          ];
+
+          if (log.roundType) {
+            parts.push(`نوع الجولة: ${roundModeLabel(log.roundType)}`);
+          }
+          if (log.originalLine) {
+            parts.push(`السطر الأصلي: ${log.originalLine}`);
+          }
+          if (log.displayedLine) {
+            parts.push(`السطر المعروض: ${log.displayedLine}`);
+          }
+          if (log.copyDetected) {
+            parts.push("كشف نسخ: نعم");
+          }
+
+          return `${parts.join("\n")}\n`;
+        })
         .join("\n") || "لا توجد سجلات بعد.";
     downloadFile("bot-logs.txt", content, "text/plain;charset=utf-8");
   }
@@ -304,7 +617,7 @@ export default function App() {
           <p className="eyebrow">Demo Web App</p>
           <h1>بوت إدارة الشات والمقالات</h1>
           <p>
-            ديمو تجريبي لبوت يراقب الشات، يرد تلقائياً، ويدير النقاط.
+            ديمو تجريبي لبوت يراقب الشات، يرد تلقائياً، ويدير النقاط والجولة العكسية.
           </p>
         </div>
         <div className={`status-pill ${botEnabled ? "active" : "paused"}`}>
@@ -335,7 +648,7 @@ export default function App() {
                   <strong>{message.sender}</strong>
                   <span>{message.time}</span>
                 </div>
-                <p>{message.text}</p>
+                <p style={{ whiteSpace: "pre-wrap" }}>{message.text}</p>
               </article>
             ))}
           </div>
@@ -344,7 +657,7 @@ export default function App() {
             <input
               value={messageText}
               onChange={(event) => setMessageText(event.target.value)}
-              placeholder="اكتب رسالة تجريبية..."
+              placeholder="اكتب رسالة تجريبية... أو !عكسي"
               aria-label="رسالة الشات"
             />
             <button type="submit">إرسال</button>
@@ -358,6 +671,42 @@ export default function App() {
               <h2>لوحة التحكم</h2>
             </div>
             <span className="inline-status">{botEnabled ? "يعمل" : "متوقف"}</span>
+          </div>
+
+          <div className="round-box">
+            <h3>الجولة العكسية</h3>
+            <p className="round-status">
+              حالة الجولة: <strong>{roundModeLabel(effectiveRoundMode)}</strong>
+            </p>
+            <label className="field">
+              <span>حد الفوز</span>
+              <select
+                value={winLimit}
+                onChange={(event) => saveWinLimit(Number(event.target.value) as WinLimit)}
+              >
+                {WIN_LIMIT_OPTIONS.map((limit) => (
+                  <option key={limit} value={limit}>
+                    {limit} نقاط
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="checkbox-field">
+              <input
+                checked={lightDecoration}
+                onChange={(event) => saveLightDecoration(event.target.checked)}
+                type="checkbox"
+              />
+              <span>زخرفة خفيفة للسطر المعروض</span>
+            </label>
+            <div className="button-row">
+              <button onClick={() => startReverseRound(true)} type="button">
+                بدء جولة عكسية
+              </button>
+              <button className="secondary" onClick={() => endReverseRound()} type="button">
+                إنهاء الجولة
+              </button>
+            </div>
           </div>
 
           <div className="button-row">
@@ -502,6 +851,9 @@ export default function App() {
                   </div>
                   <p>{log.message}</p>
                   <small>رد البوت: {log.botReply}</small>
+                  {log.originalLine && <small>السطر الأصلي: {log.originalLine}</small>}
+                  {log.displayedLine && <small>السطر المعروض: {log.displayedLine}</small>}
+                  {log.copyDetected && <small className="copy-alert">تم كشف نسخ</small>}
                   <b className={log.pointAdded ? "point-yes" : "point-no"}>
                     {log.pointAdded ? "تم احتساب نقطة" : "لا توجد نقطة"}
                   </b>
